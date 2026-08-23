@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"seaweed-zip/internal/adminauth"
 	"seaweed-zip/internal/config"
 	"seaweed-zip/internal/httpapi"
 	"seaweed-zip/internal/jobs"
@@ -16,6 +17,7 @@ import (
 	"seaweed-zip/internal/source"
 	"seaweed-zip/internal/store"
 	"seaweed-zip/web"
+	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -37,6 +39,22 @@ func main() {
 	cfg, e := config.Load()
 	if e != nil {
 		log.Fatal("invalid configuration")
+	}
+	var groups []string
+	if value := os.Getenv("SEAWEED_ZIP_OIDC_ADMIN_GROUPS"); value != "" {
+		for _, group := range strings.Split(value, ",") {
+			groups = append(groups, strings.TrimSpace(group))
+		}
+	}
+	auth, e := adminauth.New(adminauth.Settings{
+		Issuer:       os.Getenv("SEAWEED_ZIP_OIDC_ISSUER"),
+		ClientID:     os.Getenv("SEAWEED_ZIP_OIDC_CLIENT_ID"),
+		ClientSecret: os.Getenv("SEAWEED_ZIP_OIDC_CLIENT_SECRET"),
+		PublicURL:    os.Getenv("SEAWEED_ZIP_PUBLIC_URL"),
+		SessionKey:   os.Getenv("SEAWEED_ZIP_SESSION_KEY"), AdminGroups: groups,
+	})
+	if e != nil {
+		log.Fatal("OIDC initialization failed: ", e)
 	}
 	if e = os.MkdirAll(cfg.DataDir, 0700); e != nil {
 		log.Fatal("data directory unavailable")
@@ -63,7 +81,7 @@ func main() {
 	if e != nil {
 		log.Fatal("web assets unavailable")
 	}
-	server := &http.Server{Addr: cfg.Address, Handler: httpapi.New(m, ui), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
+	server := &http.Server{Addr: cfg.Address, Handler: httpapi.NewWithAuth(m, ui, auth), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	finished := make(chan struct{})
 	go func() { defer close(finished); m.Run(ctx) }()
 	go retention.Cleaner{Store: s, Dir: cfg.DataDir}.Run(ctx)

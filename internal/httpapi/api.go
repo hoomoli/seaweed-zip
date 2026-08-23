@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"seaweed-zip/internal/adminauth"
 	"seaweed-zip/internal/config"
 	"seaweed-zip/internal/jobs"
 	"seaweed-zip/internal/pack"
@@ -24,6 +25,7 @@ import (
 )
 
 type API struct {
+	Auth    *adminauth.Auth
 	Manager *jobs.Manager
 	UI      fs.FS
 	mux     *http.ServeMux
@@ -31,7 +33,12 @@ type API struct {
 }
 
 func New(m *jobs.Manager, ui fs.FS) *API {
+	return NewWithAuth(m, ui, nil)
+}
+func NewWithAuth(m *jobs.Manager, ui fs.FS, auth *adminauth.Auth) *API {
 	a := &API{Manager: m, UI: ui, mux: http.NewServeMux(), slots: make(chan struct{}, 1)}
+	a.Auth = auth
+	a.Auth.Register(a.mux)
 	a.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonOut(w, 200, map[string]string{"status": "ok"}) })
 	a.mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		if m.Store.DB.PingContext(r.Context()) != nil {
@@ -101,7 +108,15 @@ func (a *API) consumer(w http.ResponseWriter, r *http.Request) (store.Consumer, 
 func (a *API) boundary(w http.ResponseWriter, r *http.Request, admin bool) bool {
 	nets := a.Manager.Config.Trusted
 	if admin {
-		nets = a.Manager.Config.Admin
+		if a.Auth.Allowed(r) {
+			return true
+		}
+		if a.Auth != nil && r.Method == "GET" && !strings.HasPrefix(r.URL.Path, "/api/") {
+			http.Redirect(w, r, "/auth/login", http.StatusSeeOther)
+		} else {
+			a.problem(w, r, 403, "authentication", "ADMIN_AUTH_REQUIRED")
+		}
+		return false
 	}
 	if !config.Allowed(r.RemoteAddr, nets) {
 		a.problem(w, r, 403, "network", "NETWORK_DENIED")

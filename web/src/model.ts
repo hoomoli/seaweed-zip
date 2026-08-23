@@ -9,4 +9,12 @@ export function historyExpiry(d:Date):Date {const result=new Date(d);const day=r
 export function progress(p:{doneObjects:number;doneBytes:number;identity:{objects:unknown[]}},t:Translation=en):string{return `${p.doneObjects} / ${p.identity.objects.length} ${t.objects} · ${bytes(p.doneBytes)}`}
 export function pollInterval(p:{state:string}[]):number{return p.some(x=>['QUEUED','VALIDATING','PACKING','DELETING'].includes(x.state))?3000:30000}
 export const labels:Record<State,string>=en.states;
-export async function api<T>(path:string,init?:RequestInit):Promise<T>{const response=await fetch(path,init);if(!response.ok){let code=`HTTP ${response.status}`;try {const body=await response.json();code=`${body.phase}: ${body.code} · ${body.requestId}`}catch{/* Ignore non-problem upstream responses. */}throw new Error(code)}return response.json() as Promise<T>}
+export async function api<T>(path:string,init?:RequestInit):Promise<T>{
+ const headers=new Headers(init?.headers);
+ if(init?.method && !['GET','HEAD'].includes(init.method.toUpperCase())){
+  const session=await fetch('/auth/session');
+  if(!session.ok)throw new Error('Management login expired');
+  headers.set('X-CSRF-Token',(await session.json()).csrfToken);
+ }
+ const response=await fetch(path,{...init,headers});if(!response.ok){let code=`HTTP ${response.status}`;try {const body=await response.json();code=`${body.phase}: ${body.code} · ${body.requestId}`}catch{/* Ignore non-problem upstream responses. */}throw new Error(code)}if(response.status===204)return undefined as T;return response.json() as Promise<T>
+}

@@ -23,3 +23,11 @@ test('failed API is actionable, not fake task data',async({page})=>{await page.r
 test('production server rejects management and creation without configured network',async({request})=>{for(const path of ['/','/api/v1/admin/packs']){const response=await request.get('http://127.0.0.1:8089'+path);expect(response.status()).toBe(403)}const response=await request.post('http://127.0.0.1:8089/api/v1/packs',{data:{}});expect(response.status()).toBe(403)});
 
 test('language switch keeps operational state localized',async({page})=>{await page.route('**/api/**',route=>route.fulfill({json:{items:[fixture],hasMore:false}}));await page.goto('/');await page.getByText('English',{exact:true}).click();await page.locator('.ant-select-item-option-content').filter({hasText:'zh-CN'}).click();await expect(page.locator('html')).toHaveAttribute('lang','zh-CN');await expect(page.getByText(zhCN.pending).first()).toBeVisible();});
+
+test('logout handles 204 and leaves the management screen',async({page})=>{
+ await page.route('**/api/**',route=>route.fulfill({json:{items:[fixture],hasMore:false}}));
+ await page.route('**/auth/session',route=>route.fulfill({json:{csrfToken:'csrf-test'}}));
+ await page.route('**/auth/logout',route=>{expect(route.request().headers()['x-csrf-token']).toBe('csrf-test');return route.fulfill({status:204})});
+ await page.route('**/auth/login',route=>route.fulfill({contentType:'text/html',body:'<p>Identity provider login</p>'}));
+ await page.goto('/');await page.getByRole('button',{name:'Sign out',exact:true}).click();await expect(page).toHaveURL(/\/auth\/login$/);await expect(page.getByText('Identity provider login')).toBeVisible();
+});

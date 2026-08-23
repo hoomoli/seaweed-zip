@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Reproduce distribution notices from installed, locked runtime dependencies."""
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -8,6 +9,13 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+# Reviewed upstream Apache-2.0 texts; reject version or license-byte drift.
+APACHE_LICENSES = {
+    ('github.com/coreos/go-oidc/v3', 'v3.16.0', 'NOTICE'): 'dccd26c6fd9c296daf44d0bc56bb4efc566edd4880381b3331c9a63e6e471338',
+    ('github.com/coreos/go-oidc/v3', 'v3.16.0', 'LICENSE'): 'cb5e8e7e5f4a3988e1063c142c60dc2df75605f4c46515e776e3aca6df976e14',
+    ('github.com/go-jose/go-jose/v4', 'v4.1.3', 'LICENSE'): 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30',
+}
 
 
 def run(*args, env=None):
@@ -80,7 +88,8 @@ def generate():
             raise ValueError(f'Missing Go license: {name}')
         for file in files:
             text = file.read_text()
-            if not any(grant in text.lower() for grant in ('permission is hereby granted', 'redistribution and use', 'public domain')):
+            reviewed_apache = APACHE_LICENSES.get((name, module['Version'], file.name)) == hashlib.sha256(file.read_bytes()).hexdigest()
+            if not reviewed_apache and not any(grant in text.lower() for grant in ('permission is hereby granted', 'redistribution and use', 'public domain')):
                 raise ValueError(f'Unreviewed license text: {name}/{file.name}')
             output += section(f'Go: {name}@{module["Version"]} / {file.name}', text)
     lock = json.loads((ROOT / 'web/package-lock.json').read_text())

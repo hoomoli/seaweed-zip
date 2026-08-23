@@ -8,3 +8,10 @@ describe('operational status',()=>{
 });
 
 it('supports translated retention without duplicating state logic',()=>{expect(artifactRetention({state:'DELETED'},20,{cleaned:'Removed'} as never)).toBe('Removed')});
+
+it('accepts no-content logout and sends session-bound CSRF',async()=>{
+ const original=globalThis.fetch;
+ const calls:{path:string;init?:RequestInit}[]=[];
+ globalThis.fetch=async(input,init)=>{calls.push({path:String(input),init});return String(input)==='/auth/session'?new Response(JSON.stringify({csrfToken:'csrf'}),{status:200}):new Response(null,{status:204})};
+ try{const {api}=await import('./model');expect(await api('/auth/logout',{method:'POST'})).toBeUndefined();expect(new Headers(calls[1].init?.headers).get('X-CSRF-Token')).toBe('csrf')}finally{globalThis.fetch=original}
+});

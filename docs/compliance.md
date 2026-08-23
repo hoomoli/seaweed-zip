@@ -8,10 +8,14 @@ at each release.
 
 - Project: MIT, copyright 2026 hoomoli. The owner must hold the necessary rights
   to the original code and documentation; automation cannot establish ownership.
-- Distributed Go graph: eight external modules, derived from the union of
+- Distributed Go graph: locked external modules, derived from the union of
   linux/amd64 and linux/arm64, with CGO disabled. Original module license files,
   modernc libc's nested third-party notices, and SQLite's public-domain
   declaration are preserved in `THIRD_PARTY_NOTICES.txt`.
+- OIDC: coreos/go-oidc v3.16.0 and go-jose v4.1.3 use Apache-2.0; original
+  license texts are preserved and their reviewed hashes/version tuples are pinned
+  in the notice generator. OAuth2 v0.36.0 uses BSD-3-Clause. These additions are
+  necessary for discovery, JWT/JWKS validation and PKCE code exchange.
 - Frontend: 70 locked production npm dependencies declare MIT. Installed license
   text and author attribution are retained. Vite 8 and Rolldown license notices,
   including Rolldown's bundled third-party declarations, also cover potentially

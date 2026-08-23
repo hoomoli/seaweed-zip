@@ -21,7 +21,6 @@ Development environment (do not copy to a public deployment):
 
 ```
 export SEAWEED_ZIP_TRUSTED_CIDRS=127.0.0.0/8,::1/128
-export SEAWEED_ZIP_ADMIN_CIDRS=127.0.0.0/8,::1/128
 export SEAWEED_ZIP_SOURCES='{"assets":{"host":"storage.example.invalid:8333","bucket":"resources","prefix":"/resources/","dial":"seaweedfs:8333"}}'
 go run ./cmd/seaweed-zip
 ```
@@ -79,7 +78,7 @@ limits requires restart and review of WAITING_AUTH tasks.
 
 ## Production acceptance (not executed)
 
-1. Confirm volume capacity, allowed hosts, trusted/admin networks, TLS/auth proxy.
+1. Confirm volume capacity, allowed hosts, creation trusted networks, TLS and OIDC authorization.
 2. Recheck pinned toolchain/dependency security at rollout; build nonroot image.
 3. Verify true SeaweedFS presigned GET over the configured fixed route, preserving
    signed Host, raw path/query and transport semantics. No unsigned fallback.
@@ -87,3 +86,66 @@ limits requires restart and review of WAITING_AUTH tasks.
    BagIt/object SHA256 verification, restart/authorization recovery and cleanup.
 5. Verify measured memory, ZIP64/large file behavior and physical disk exhaustion.
 6. Consumer deployment integration is a separate task with its own cache/publish acceptance.
+
+## Management OIDC (Pocket ID)
+
+Management UI and `/api/v1/admin/*` require a server-side OIDC session.
+`SEAWEED_ZIP_ADMIN_CIDRS` is a legacy setting and no longer grants management
+access, even on localhost. Missing OIDC configuration denies management;
+partial/invalid configuration or failed discovery prevents startup. Health,
+creation network restrictions and consumer capability tokens remain independent.
+Do not allow an entire proxy network merely to make management accessible.
+
+Configure a dedicated **Confidential** Web client in Pocket ID with exactly:
+
+- Issuer: `https://pocket.chuandashow.com` (must match discovery issuer).
+- Callback: `https://seaweed-zip.chuandashow.com/auth/callback`.
+- Scopes: `openid profile email groups`; PKCE S256 is mandatory.
+- Restrict client access to the dedicated `seaweed-zip-admins` group. Initially
+  assign only the existing approved Pocket ID administrators to that group.
+- Include a `groups` array of exact group names in the signed **ID token**.
+  A group ID, a string claim, or a userinfo-only claim does not satisfy this contract.
+  Verify this in a real authorized login before production acceptance.
+
+Environment contract (all required together, no secrets in Git):
+
+| Variable | Format / value |
+| --- | --- |
+| `SEAWEED_ZIP_OIDC_ISSUER` | `https://pocket.chuandashow.com` |
+| `SEAWEED_ZIP_OIDC_CLIENT_ID` | Dedicated client ID |
+| `SEAWEED_ZIP_OIDC_CLIENT_SECRET` | Confidential client secret, injected by deployment |
+| `SEAWEED_ZIP_PUBLIC_URL` | `https://seaweed-zip.chuandashow.com`, origin only |
+| `SEAWEED_ZIP_OIDC_ADMIN_GROUPS` | `seaweed-zip-admins`; comma-separated exact names, any matching group grants management |
+| `SEAWEED_ZIP_SESSION_KEY` | Standard Base64 of exactly 32 cryptographically random bytes |
+
+Generate the session key with `openssl rand -base64 32` in a protected operator
+context. Store it independently of the OIDC client secret. Do not paste either
+secret into chats or commit it. No credentials are needed at build time.
+The key authenticates opaque cookie identifiers; sessions and login transactions
+are bounded in-memory stores, never browser-stored access/refresh/ID tokens.
+Restart or key rotation logs everyone out. One-hour maximum sessions are capped
+by ID-token expiry; group changes become effective on the next login, at expiry,
+or immediately by restarting the service to revoke every session. No refresh flow.
+
+HTTPS is required at the public reverse proxy; backend HTTP is supported.
+Redirects and CSRF Origin checks use the configured external origin, never
+untrusted Host, X-Forwarded-Host or X-Forwarded-Proto headers. Preserve browser
+Origin and Cookie headers and route `/auth/*` to the same instance as the UI/API.
+Do not cache authenticated pages or endpoints. Do not log callback query strings,
+Cookie headers, token responses, authorization headers or presigned URLs.
+Discovery/token/JWKS endpoints must use HTTPS with normal certificate validation.
+
+Login binds state and nonce to a signed, Secure/HttpOnly, host-only browser cookie
+and a five-minute single-use server transaction; authorization code exchange uses
+PKCE S256. JWT signature, issuer, audience, expiry, nonce and exact administrator
+group are all checked. Management writes and POST `/auth/logout` require the
+exact public Origin and `X-CSRF-Token` from authenticated GET `/auth/session`.
+All cookies use the `__Host-` prefix, Path `/` and SameSite=Lax.
+Logout revokes the local session and clears its cookie. It does **not** log the
+user out of Pocket ID or other applications; signing in may reuse the issuer SSO.
+There is no open return URL or guessed issuer logout endpoint.
+
+Deployment acceptance (separate from CI/image publication): verify anonymous
+management denial, ordinary-group denial, real administrator login, mutation
+CSRF rejection/success, logout revocation, and creation/capability isolation
+through the actual HTTPS proxy. Never claim deployed acceptance from mocked tests.
