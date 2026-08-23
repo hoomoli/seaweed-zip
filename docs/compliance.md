@@ -12,7 +12,7 @@ at each release.
   linux/amd64 and linux/arm64, with CGO disabled. Original module license files,
   modernc libc's nested third-party notices, and SQLite's public-domain
   declaration are preserved in `THIRD_PARTY_NOTICES.txt`.
-- OIDC: coreos/go-oidc v3.16.0 and go-jose v4.1.3 use Apache-2.0; original
+- OIDC: coreos/go-oidc v3.16.0 and go-jose v4.1.4 use Apache-2.0; original
   license texts are preserved and their reviewed hashes/version tuples are pinned
   in the notice generator. OAuth2 v0.36.0 uses BSD-3-Clause. These additions are
   necessary for discovery, JWT/JWKS validation and PKCE code exchange.

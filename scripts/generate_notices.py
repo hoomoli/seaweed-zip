@@ -14,7 +14,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 APACHE_LICENSES = {
     ('github.com/coreos/go-oidc/v3', 'v3.16.0', 'NOTICE'): 'dccd26c6fd9c296daf44d0bc56bb4efc566edd4880381b3331c9a63e6e471338',
     ('github.com/coreos/go-oidc/v3', 'v3.16.0', 'LICENSE'): 'cb5e8e7e5f4a3988e1063c142c60dc2df75605f4c46515e776e3aca6df976e14',
-    ('github.com/go-jose/go-jose/v4', 'v4.1.3', 'LICENSE'): 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30',
+    ('github.com/go-jose/go-jose/v4', 'v4.1.4', 'LICENSE'): 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30',
 }
 
 

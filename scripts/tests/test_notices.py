@@ -42,3 +42,13 @@ class NpmLicenseTest(unittest.TestCase):
             self.assertIn('Build runtime helpers: rolldown@1.0.0 / THIRD-PARTY-LICENSE', output)
             self.assertIn('Bundled third-party grant', output)
             self.assertNotIn('Build runtime helpers: rollup', output)
+
+
+class OIDCDependencyTest(unittest.TestCase):
+    def test_jose_security_patch_has_reviewed_license(self):
+        module = 'github.com/go-jose/go-jose/v4'
+        version = 'v4.1.4'
+        self.assertIn(f'{module} {version}', (notices.ROOT / 'go.mod').read_text())
+        self.assertEqual(
+            notices.APACHE_LICENSES.get((module, version, 'LICENSE')),
+            'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30')
