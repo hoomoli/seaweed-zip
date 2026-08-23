@@ -1,6 +1,8 @@
 import importlib.util
+import json
 import pathlib
 import os
+import re
 import subprocess
 import tempfile
 import textwrap
@@ -47,6 +49,20 @@ class ContainerContractTest(unittest.TestCase):
         self.assertIn('--read-only', script)
 
 class WorkflowContractTest(unittest.TestCase):
+    def test_node_build_and_validation_versions_match(self):
+        root = pathlib.Path(__file__).parents[2]
+        workflow = (root / '.github/workflows/ci.yml').read_text()
+        dockerfile = (root / 'Dockerfile').read_text()
+        ci_version = re.search(r'node-version: ([0-9.]+)', workflow).group(1)
+        build_version = re.search(r'FROM node:([0-9.]+)-alpine@sha256:', dockerfile).group(1)
+        self.assertEqual(ci_version, build_version)
+
+    def test_react_renderer_matches_runtime(self):
+        package = json.loads((pathlib.Path(__file__).parents[2] / 'web/package.json').read_text())
+        self.assertEqual(package['dependencies']['react'], package['dependencies']['react-dom'])
+        for name in ('@types/react', '@types/react-dom'):
+            self.assertEqual(package['dependencies']['react'].split('.')[:2], package['devDependencies'][name].split('.')[:2])
+
     def test_validation_caches_only_reusable_dependencies_and_builds(self):
         workflow = (pathlib.Path(__file__).parents[2] / '.github/workflows/ci.yml').read_text()
         go_setup = workflow.split('      - uses: actions/setup-go@', 1)[1].split('      - uses:', 1)[0]
@@ -110,7 +126,7 @@ class NoticeGraphTest(unittest.TestCase):
     def test_bundled_build_helpers_have_notices(self):
         text = (pathlib.Path(__file__).parents[2] / 'THIRD_PARTY_NOTICES.txt').read_text()
         self.assertTrue('Build runtime helpers: vite' in text)
-        self.assertTrue('Build runtime helpers: rollup' in text)
+        self.assertTrue('Build runtime helpers: rolldown' in text)
 
 class ConfigurationGateTest(unittest.TestCase):
     def test_configuration_scan_precedes_image_upload(self):

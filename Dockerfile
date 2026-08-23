@@ -1,4 +1,4 @@
-FROM node:22.20.0-alpine@sha256:dbcedd8aeab47fbc0f4dd4bffa55b7c3c729a707875968d467aaaea42d6225af AS ui
+FROM node:26.11.1-alpine@sha256:143494b1da2945f061539253adc65e4f1569ddf07da2d384c022c791a9d90a4a AS ui
 WORKDIR /src/web
 COPY web/package*.json ./
 RUN npm ci --ignore-scripts

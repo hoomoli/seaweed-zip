@@ -1,6 +1,21 @@
-import { test,expect } from '@playwright/test';
+import { test as base,expect } from '@playwright/test';
 import {zhCN} from '../src/locales/zh-CN';
+const test=base.extend<{antdWarnings:string[]}>({antdWarnings:[async({page},use)=>{
+ const warnings:string[]=[];
+ page.on('console',message=>{if(message.text().includes('[antd:')&&message.text().includes('deprecated'))warnings.push(message.text())});
+ await use(warnings);
+ expect(warnings,'Upgraded components must use supported Ant Design APIs').toEqual([]);
+},{auto:true}]});
 const fixture={packId:'a'.repeat(64),state:'READY',generation:1,consumerCount:1,ackCount:0,identity:{game:'Test resources',platform:'android',release:'1.0.0',node:'test-node',objects:[{sha256:'b'.repeat(64),size:1024}]},doneBytes:1024,doneObjects:1,bytes:1536,createdAt:Math.floor(Date.now()/1000)-86400,deleteAfter:Math.floor(Date.now()/1000)-60};
+test('desktop evidence keeps drawer width and timeline content after upgrade',async({page})=>{
+ await page.route('**/api/**',route=>route.fulfill({json:route.request().url().endsWith('/'+fixture.packId)?{pack:fixture,consumers:[],events:[{phase:'READY',code:'VERIFIED',at:fixture.createdAt+5}]}:{items:[fixture],hasMore:false}}));
+ await page.goto('/');
+ await page.locator('.id-link').click();
+ const dialog=page.getByRole('dialog');
+ await expect(dialog).toBeVisible();
+ await expect(page.getByText('READY · VERIFIED')).toBeVisible();
+ await expect.poll(async()=>Math.round((await dialog.boundingBox())!.width)).toBe(640);
+});
 test('empty desktop starts without demonstration tasks',async({page})=>{await page.route('**/api/**',route=>route.fulfill({json:{items:[],hasMore:false}}));await page.goto('/');await expect(page.getByText('No pack tasks').first()).toBeVisible();await expect(page.getByRole('heading',{name:'Pack tasks'})).toBeVisible();await page.screenshot({path:'test-results/desktop.png',fullPage:true,animations:'disabled'})});
 test('shows pending cleanup, separate history and real progress',async({page})=>{await page.route('**/api/**',route=>route.fulfill({json:{items:[fixture],hasMore:false}}));await page.goto('/');await expect(page.getByText('Pending cleanup').first()).toBeVisible();await expect(page.getByText('1 / 1 objects · 1 KiB').first()).toBeVisible();await expect(page.getByText('1.5 KiB').first()).toBeVisible();await page.screenshot({path:'test-results/desktop-task.png',fullPage:true,animations:'disabled'})});
 test('mobile has no horizontal overflow and shows details',async({page})=>{await page.setViewportSize({width:390,height:844});await page.route('**/api/**',route=>{if(route.request().url().endsWith('/'+'a'.repeat(64)))return route.fulfill({json:{pack:fixture,consumers:[{consumerId:'test-consumer',generation:1,ack:false,cancelled:false,node:'test-node',createdAt:fixture.createdAt}],events:[{phase:'READY',code:'VERIFIED',at:fixture.createdAt+5}]}});return route.fulfill({json:{items:[fixture],hasMore:false}})});await page.goto('/');await expect(page.locator('.pack-card')).toBeVisible();expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth)).toBeTruthy();await page.screenshot({path:'test-results/mobile.png',fullPage:true,animations:'disabled'});await page.locator('.pack-card').click();await expect(page.getByText('Task evidence')).toBeVisible();await expect(page.getByText('Not acknowledged')).toBeVisible();await page.screenshot({path:'test-results/mobile-detail.png',fullPage:true,animations:'disabled'})});
