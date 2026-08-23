@@ -1,0 +1,207 @@
+name: Validate and publish
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: seaweed-zip-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    outputs:
+      image_changed: ${{ steps.changes.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: |
+            go.sum
+            .github/workflows/ci.yml
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.20.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Repository policy and regression tests
+        run: |
+          python3 -m unittest discover -s scripts/tests
+          python3 scripts/repository_policy.py
+          python3 scripts/scan_secrets.py
+      - name: Scan repository configuration
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.69.3
+          scan-type: config
+          scan-ref: .
+          format: json
+          output: /tmp/seaweed-zip-config.json
+          exit-code: '0'
+      - name: Enforce configuration gate
+        run: python3 scripts/check_image.py /tmp/seaweed-zip-config.json
+      - name: Determine production inputs
+        id: changes
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT" = push ]; then
+            echo "changed=$(python3 scripts/repository_policy.py --image-changed "$BEFORE" "$AFTER")" >> "$GITHUB_OUTPUT"
+          else
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Frontend and dependency audit
+        run: |
+          npm ci --prefix web --ignore-scripts
+          npm audit --prefix web --audit-level=high --registry=https://registry.npmjs.org
+          npm run test --prefix web
+          npm run build --prefix web
+          python3 scripts/generate_notices.py --check
+      - name: Go validation and vulnerability audit
+        run: |
+          go test -race -count=1 ./...
+          go vet ./...
+          go build ./cmd/seaweed-zip
+          export GOBIN="$RUNNER_TEMP/seaweed-zip-tools"
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          for arch in amd64 arm64; do
+            echo "Vulnerability audit: linux/$arch"
+            GOOS=linux GOARCH="$arch" "$GOBIN/govulncheck" ./...
+          done
+      - name: Cache Playwright browsers
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('web/package-lock.json') }}
+      - name: Browser regressions
+        run: |
+          cd web
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+
+  image:
+    needs: validate
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.validate.outputs.image_changed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build without registry credentials
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        env:
+          DOCKER_BUILD_RECORD_UPLOAD: false
+          DOCKER_BUILD_SUMMARY: false
+        with:
+          context: .
+          load: true
+          push: false
+          tags: seaweed-zip:scan
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          cache-from: type=gha,scope=seaweed-zip-${{ matrix.arch }}
+          cache-to: type=gha,scope=seaweed-zip-${{ matrix.arch }},mode=min
+      - name: Scan image (report stays on runner)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: seaweed-zip:scan
+          version: v0.69.3
+          scan-type: image
+          scanners: vuln,secret
+          format: json
+          output: /tmp/seaweed-zip-scan.json
+          exit-code: '0'
+          ignore-unfixed: false
+      - name: Enforce scan gate and smoke test
+        run: |
+          python3 scripts/check_image.py /tmp/seaweed-zip-scan.json
+          python3 scripts/smoke_image.py seaweed-zip:scan
+          docker save seaweed-zip:scan -o /tmp/image.tar
+          cd /tmp
+          sha256sum image.tar > image.tar.sha256
+      - name: Transfer only the scanned distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-${{ matrix.arch }}
+          path: |
+            /tmp/image.tar
+            /tmp/image.tar.sha256
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    needs: [validate, image]
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && needs.validate.outputs.image_changed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/hoomoli/seaweed-zip
+      SHA: ${{ github.sha }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: image-*
+          path: /tmp/scanned
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Publish exactly the verified archives
+        id: publish
+        env:
+          REGISTRY_TOKEN: ${{ github.token }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+          for arch in amd64 arm64; do
+            (cd "/tmp/scanned/image-$arch" && sha256sum -c image.tar.sha256)
+            docker load -i "/tmp/scanned/image-$arch/image.tar"
+            docker tag seaweed-zip:scan "$IMAGE:sha-$SHA-$arch"
+            docker push "$IMAGE:sha-$SHA-$arch"
+          done
+          docker buildx imagetools create -t "$IMAGE:sha-$SHA" "$IMAGE:sha-$SHA-amd64" "$IMAGE:sha-$SHA-arm64"
+          digest=$(docker buildx imagetools inspect "$IMAGE:sha-$SHA" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Attest published multiarch digest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ghcr.io/hoomoli/seaweed-zip
+          subject-digest: ${{ steps.publish.outputs.digest }}
+          push-to-registry: true
+      - name: Promote latest only for the current main tip
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [ "$current" = "$SHA" ]; then
+            docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE@$DIGEST"
+          else
+            echo 'Main advanced; immutable SHA image published, latest left unchanged.'
+          fi
+      - name: Remove registry credentials
+        if: always()
+        run: docker logout ghcr.io

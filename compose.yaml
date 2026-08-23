@@ -1,0 +1,26 @@
+services:
+  seaweed-zip:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      SEAWEED_ZIP_DATA: /data
+      # Explicit configuration required; default denies creation and management.
+      SEAWEED_ZIP_TRUSTED_CIDRS: ${SEAWEED_ZIP_TRUSTED_CIDRS:-}
+      SEAWEED_ZIP_ADMIN_CIDRS: ${SEAWEED_ZIP_ADMIN_CIDRS:-}
+      SEAWEED_ZIP_SOURCES: ${SEAWEED_ZIP_SOURCES:-{}}
+      SEAWEED_ZIP_DISK_QUOTA: ${SEAWEED_ZIP_DISK_QUOTA:-53687091200}
+    volumes:
+      - seaweed-zip-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 128
+    restart: unless-stopped
+    stop_grace_period: 40s
+volumes:
+  seaweed-zip-data:
