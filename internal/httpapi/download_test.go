@@ -60,14 +60,13 @@ func TestRangeAckAndLease(t *testing.T) {
 	if e = s.Ack(context.Background(), c, j.Generation, "ziphash"); e != nil {
 		t.Fatal(e)
 	}
-	lease, e := s.BeginDownload(context.Background(), c, time.Now().Add(time.Minute))
-	if e != nil {
-		t.Fatal(e)
+	if _, e = s.BeginDownload(context.Background(), c, time.Now().Add(time.Minute)); e == nil {
+		t.Fatal("acknowledged consumer reopened download")
 	}
-	if s.CleanClaim(context.Background(), p.ID, time.Now().Add(24*time.Hour)) != nil {
-		t.Fatal("expired lease should not block")
+	if s.CleanClaim(context.Background(), p.ID, time.Now()) != nil {
+		t.Fatal("all ACK cleanup not eligible")
 	}
-	s.EndDownload(lease)
+
 }
 
 func TestRepeatedAcknowledgmentHasOneEvent(t *testing.T) {
@@ -86,5 +85,17 @@ func TestRepeatedAcknowledgmentHasOneEvent(t *testing.T) {
 	events, _ := s.Events(ctx, p.ID)
 	if len(events) != 1 {
 		t.Fatal("ack not idempotent", len(events))
+	}
+	if e := s.CleanClaim(ctx, p.ID, time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Deleted(ctx, p.ID, j.Generation, time.Now()); e != nil {
+		t.Fatal(e)
+	}
+	if e := s.Ack(ctx, c, j.Generation, "ziphash"); e != nil {
+		t.Fatal("lost ACK response cannot recover after cleanup", e)
+	}
+	if e := s.Ack(ctx, c, j.Generation-1, "ziphash"); e != store.ErrConflict {
+		t.Fatal("stale historical ACK accepted")
 	}
 }

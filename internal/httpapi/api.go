@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"seaweed-zip/internal/adminauth"
-	"seaweed-zip/internal/config"
 	"seaweed-zip/internal/jobs"
 	"seaweed-zip/internal/pack"
 	"seaweed-zip/internal/retention"
@@ -21,22 +20,26 @@ import (
 	"seaweed-zip/internal/store"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 type API struct {
-	Auth    *adminauth.Auth
-	Manager *jobs.Manager
-	UI      fs.FS
-	mux     *http.ServeMux
-	slots   chan struct{}
+	Auth       *adminauth.Auth
+	Manager    *jobs.Manager
+	UI         fs.FS
+	mux        *http.ServeMux
+	slots      chan struct{}
+	rateMu     sync.Mutex
+	rateTokens float64
+	rateAt     time.Time
 }
 
 func New(m *jobs.Manager, ui fs.FS) *API {
 	return NewWithAuth(m, ui, nil)
 }
 func NewWithAuth(m *jobs.Manager, ui fs.FS, auth *adminauth.Auth) *API {
-	a := &API{Manager: m, UI: ui, mux: http.NewServeMux(), slots: make(chan struct{}, 1)}
+	a := &API{Manager: m, UI: ui, mux: http.NewServeMux(), slots: make(chan struct{}, 1), rateTokens: 4, rateAt: time.Now()}
 	a.Auth = auth
 	a.Auth.Register(a.mux)
 	a.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonOut(w, 200, map[string]string{"status": "ok"}) })
@@ -78,7 +81,16 @@ func (a *API) problem(w http.ResponseWriter, r *http.Request, status int, phase,
 }
 func (a *API) decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 8<<20)
-	d := json.NewDecoder(r.Body)
+	b, e := io.ReadAll(r.Body)
+	if e != nil {
+		a.problem(w, r, 400, "request", "INVALID_JSON")
+		return false
+	}
+	if _, e = pack.StrictJSON(b); e != nil {
+		a.problem(w, r, 400, "request", "INVALID_JSON")
+		return false
+	}
+	d := json.NewDecoder(strings.NewReader(string(b)))
 	d.DisallowUnknownFields()
 	if e := d.Decode(v); e != nil {
 		a.problem(w, r, 400, "request", "INVALID_JSON")
@@ -106,7 +118,6 @@ func (a *API) consumer(w http.ResponseWriter, r *http.Request) (store.Consumer, 
 	return c, true
 }
 func (a *API) boundary(w http.ResponseWriter, r *http.Request, admin bool) bool {
-	nets := a.Manager.Config.Trusted
 	if admin {
 		if a.Auth.Allowed(r) {
 			return true
@@ -118,15 +129,22 @@ func (a *API) boundary(w http.ResponseWriter, r *http.Request, admin bool) bool 
 		}
 		return false
 	}
-	if !config.Allowed(r.RemoteAddr, nets) {
-		a.problem(w, r, 403, "network", "NETWORK_DENIED")
-		return false
-	}
+	// Submission authority is demonstrated source access, not caller IP.
 	return true
 }
 func (a *API) authorize(w http.ResponseWriter, r *http.Request, p pack.Plan) bool {
 	if e := a.Manager.Authorize(r.Context(), p); e != nil {
 		code := "SOURCE_AUTHORIZATION_OR_LIMIT_FAILED"
+		if specific, ok := map[string]string{
+			"canonical manifest hash mismatch":      "CANONICAL_MANIFEST_HASH_MISMATCH",
+			"manifest schema or selection mismatch": "MANIFEST_SCHEMA_OR_SELECTION_MISMATCH",
+			"manifest is not canonical":             "MANIFEST_NOT_CANONICAL",
+			"manifest locator mismatch":             "SOURCE_LOCATOR_MISMATCH",
+			"object locator mismatch":               "SOURCE_LOCATOR_MISMATCH",
+			"source scope denied":                   "SOURCE_SCOPE_DENIED",
+		}[e.Error()]; ok {
+			code = specific
+		}
 		if e.Error() == "disk quota" {
 			code = "DISK_QUOTA"
 		}
@@ -148,10 +166,25 @@ func (a *API) authorize(w http.ResponseWriter, r *http.Request, p pack.Plan) boo
 	return true
 }
 func (a *API) take(w http.ResponseWriter, r *http.Request) bool {
+	// Global admission avoids trusting forwarded caller addresses. Slow source
+	// probes occupy the single slot; fast failures cannot bypass the time budget.
+	a.rateMu.Lock()
+	now := time.Now()
+	a.rateTokens = min(4, a.rateTokens+now.Sub(a.rateAt).Seconds())
+	a.rateAt = now
+	if a.rateTokens < 1 {
+		a.rateMu.Unlock()
+		w.Header().Set("Retry-After", "1")
+		a.problem(w, r, 429, "admission", "BUSY")
+		return false
+	}
+	a.rateTokens--
+	a.rateMu.Unlock()
 	select {
 	case a.slots <- struct{}{}:
 		return true
 	default:
+		w.Header().Set("Retry-After", "1")
 		a.problem(w, r, 429, "admission", "BUSY")
 		return false
 	}
@@ -171,6 +204,10 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ClientRequestID == "" || len(req.ClientRequestID) > 256 || len(req.Node) > 256 || len(req.Deployment) > 256 {
 		a.problem(w, r, 400, "request", "INVALID_IDEMPOTENCY_KEY")
+		return
+	}
+	if req.ContractVersion != pack.ContractVersion || !pack.ValidHash(req.CanonicalManifestHash) {
+		a.problem(w, r, 400, "request", "UNSUPPORTED_CONTRACT_OR_HASH")
 		return
 	}
 	p, e := pack.Normalize(req)
@@ -260,7 +297,7 @@ func (a *API) ack(w http.ResponseWriter, r *http.Request) {
 		a.problem(w, r, 409, "ack", "ARTIFACT_MISMATCH")
 		return
 	}
-
+	retention.Cleaner{Store: a.Manager.Store, Dir: a.Manager.Config.DataDir}.Sweep(r.Context(), time.Now())
 	jsonOut(w, 200, map[string]bool{"ack": true})
 }
 func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +309,7 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 		a.problem(w, r, 409, "cancel", "STATE_CONFLICT")
 		return
 	}
+	retention.Cleaner{Store: a.Manager.Store, Dir: a.Manager.Config.DataDir}.Sweep(r.Context(), time.Now())
 	jsonOut(w, 200, map[string]bool{"cancelled": true})
 }
 func (a *API) artifact(w http.ResponseWriter, r *http.Request) {
@@ -301,6 +339,9 @@ func (a *API) artifact(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		a.Manager.Store.EndDownload(lease)
 		a.Manager.Store.Event(context.Background(), p.ID, "DOWNLOAD", "SEND_EXIT_NOT_ACK")
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		retention.Cleaner{Store: a.Manager.Store, Dir: a.Manager.Config.DataDir}.Sweep(ctx, time.Now())
 	}()
 	if filepath.Base(p.Artifact) != p.Artifact {
 		a.problem(w, r, 500, "download", "UNSAFE_PATH")

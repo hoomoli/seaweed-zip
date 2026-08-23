@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Seaweed Zip",
-    "version": "0.1.0",
-    "description": "Single-tenant network-restricted BagIt ZIP extension, not S3 compatible. Submission/admin require explicit peer CIDRs. Time fields are Unix seconds. Capabilities never appear in URLs."
+    "version": "0.2.0",
+    "description": "Source-authorized versioned release-manifest missing-object BagIt delivery. Pocket ID protects management. No machine API token or trusted CIDR is required for submission. Time fields are Unix seconds; capabilities never appear in URLs."
   },
   "servers": [
     {
@@ -835,7 +835,7 @@
     },
     "/api/v1/admin/packs": {
       "get": {
-        "summary": "Admin peer CIDRs only, independently protected by network/auth proxy",
+        "summary": "Pocket ID administrator session only; no consumer capability grants management access",
         "security": [],
         "responses": {
           "200": {
@@ -1091,7 +1091,7 @@
         }
       ],
       "post": {
-        "summary": "Admin controlled consumer cancellation; no immediate destructive cleanup",
+        "summary": "Pocket ID administrator controlled consumer cancellation",
         "security": [],
         "responses": {
           "200": {
@@ -1354,46 +1354,56 @@
           "manifestSha256",
           "manifestUrl",
           "objects",
-          "clientRequestId"
+          "clientRequestId",
+          "contractVersion",
+          "canonicalManifestHash"
         ],
         "properties": {
           "sourceId": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 256
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
           },
           "bucket": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 256
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
           },
           "game": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 256
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
           },
           "platform": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 256
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
           },
           "release": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 256
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
           },
           "clientRequestId": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 256
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
           },
           "manifestSha256": {
             "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "SHA256 of exact immutable original GET bytes; distinct from the ZIP digest."
           },
           "canonicalManifestHash": {
             "type": "string",
-            "description": "Informational upstream canonical hash; not recomputed or used as raw manifest hash."
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "SHA256 of the independently reconstructed canonical release manifest including trailing LF; supported immutable manifests must already be canonical."
           },
           "manifestUrl": {
             "type": "string",
@@ -1410,11 +1420,17 @@
           },
           "node": {
             "type": "string",
-            "maxLength": 256
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
           },
           "deployment": {
             "type": "string",
-            "maxLength": 256
+            "maxLength": 256,
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
+          },
+          "contractVersion": {
+            "type": "string",
+            "const": "release-manifest-v1"
           }
         }
       },

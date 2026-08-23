@@ -61,3 +61,29 @@ func TestBareAuthorizationRejected(t *testing.T) {
 		t.Fatal("bare capability accepted")
 	}
 }
+
+func TestAdmissionRateAndDuplicateJSON(t *testing.T) {
+	s, _ := store.Open(filepath.Join(t.TempDir(), "db"))
+	defer s.Close()
+	a := New(jobs.New(s, source.New(nil), config.Config{}), nil)
+	for i := 0; i < 5; i++ {
+		r := httptest.NewRequest("POST", "/api/v1/packs", nil)
+		w := httptest.NewRecorder()
+		ok := a.take(w, r)
+		if ok {
+			<-a.slots
+		}
+		if i < 4 && !ok {
+			t.Fatal("initial burst denied")
+		}
+		if i == 4 && (ok || w.Code != 429) {
+			t.Fatal("unbounded submission rate")
+		}
+	}
+	r := httptest.NewRequest("POST", "/api/v1/packs", strings.NewReader(`{"game":"a","game":"b"}`))
+	w := httptest.NewRecorder()
+	var body pack.Request
+	if a.decode(w, r, &body) || w.Code != 400 {
+		t.Fatal("duplicate JSON accepted")
+	}
+}

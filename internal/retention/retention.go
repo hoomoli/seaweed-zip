@@ -2,6 +2,8 @@ package retention
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -40,9 +42,6 @@ func (c Cleaner) sweep(ctx context.Context, now, cutoff time.Time) {
 		return
 	}
 	for _, p := range list {
-		if p.State == "READY" && p.DeleteAfter > cutoff.Unix() {
-			continue
-		}
 		if p.State != "READY" && p.State != "DELETING" {
 			continue
 		}
@@ -97,12 +96,13 @@ func (c Cleaner) Run(ctx context.Context) {
 			c.sweep(ctx, cutoff, cutoff)
 			timer.Reset(time.Until(Next(time.Now())))
 		case <-retry.C:
-			c.sweep(ctx, time.Now(), cutoff)
+			c.sweep(ctx, time.Now(), time.Now())
 		}
 	}
 }
 
 var artifactName = regexp.MustCompile(`^([a-f0-9]{64})-([0-9]+)\.zip(\.partial)?$`)
+var stagingName = regexp.MustCompile(`^([a-f0-9]{64})-([0-9]+)\.staging-[0-9]+$`)
 
 func (c Cleaner) orphans(ctx context.Context) map[string]bool {
 	remaining := map[string]bool{}
@@ -117,17 +117,36 @@ func (c Cleaner) orphans(ctx context.Context) map[string]bool {
 	}
 	defer root.Close()
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return remaining
+		}
 		match := artifactName.FindStringSubmatch(entry.Name())
+		stage := false
+		if match == nil {
+			match = stagingName.FindStringSubmatch(entry.Name())
+			stage = match != nil
+		}
 		if match == nil {
 			continue
 		}
 		p, e := c.Store.Get(ctx, match[1])
+		// A timeout or storage failure is not evidence that a live worker's files
+		// are orphaned. Only a confirmed missing row permits unknown-ID cleanup.
+		if e != nil && !errors.Is(e, sql.ErrNoRows) {
+			remaining[match[1]] = true
+			continue
+		}
 		generation, _ := strconv.ParseInt(match[2], 10, 64)
 		if e == nil && (p.Artifact == entry.Name() || p.State == "PACKING" && p.Generation == generation) {
 			remaining[match[1]] = true
 			continue
 		}
-		if e = root.Remove(entry.Name()); e != nil && !os.IsNotExist(e) {
+		if stage {
+			e = root.RemoveAll(entry.Name())
+		} else {
+			e = root.Remove(entry.Name())
+		}
+		if e != nil && !os.IsNotExist(e) {
 			remaining[match[1]] = true
 			c.Store.Event(ctx, match[1], "CLEANUP", "ORPHAN_DELETE_FAILED")
 		}

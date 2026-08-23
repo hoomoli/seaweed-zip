@@ -9,11 +9,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 )
 
 const FormatVersion = "bagit-store-v1"
+const ContractVersion = "release-manifest-v1"
 
 type Object struct {
 	SHA256 string `json:"sha256"`
@@ -21,6 +23,7 @@ type Object struct {
 	URL    string `json:"url,omitempty"`
 }
 type Request struct {
+	ContractVersion       string   `json:"contractVersion"`
 	SourceID              string   `json:"sourceId"`
 	Bucket                string   `json:"bucket"`
 	Game                  string   `json:"game"`
@@ -47,9 +50,15 @@ func ValidHash(s string) bool {
 }
 func Normalize(r Request) (Plan, error) {
 	var p Plan
+	label := regexp.MustCompile(`^[A-Za-z0-9._-]{1,256}$`)
 	for _, s := range []string{r.SourceID, r.Bucket, r.Game, r.Platform, r.Release} {
-		if s == "" || len(s) > 256 || strings.ContainsAny(s, "\r\n\x00") {
+		if !label.MatchString(s) {
 			return p, errors.New("invalid identity")
+		}
+	}
+	for _, s := range []string{r.Node, r.Deployment, r.ClientRequestID} {
+		if s != "" && !label.MatchString(s) {
+			return p, errors.New("invalid label")
 		}
 	}
 	if !ValidHash(r.ManifestSHA256) || len(r.Objects) == 0 {

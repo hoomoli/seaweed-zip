@@ -5,9 +5,8 @@ services:
       - "127.0.0.1:8080:8080"
     environment:
       SEAWEED_ZIP_DATA: /data
-      # Explicit configuration required; default denies creation and management.
-      SEAWEED_ZIP_TRUSTED_CIDRS: ${SEAWEED_ZIP_TRUSTED_CIDRS:-}
-      SEAWEED_ZIP_ADMIN_CIDRS: ${SEAWEED_ZIP_ADMIN_CIDRS:-}
+      # Explicit source rules required; Pocket ID protects management separately.
+      SEAWEED_ZIP_CONCURRENCY: ${SEAWEED_ZIP_CONCURRENCY:-4}
       SEAWEED_ZIP_SOURCES: ${SEAWEED_ZIP_SOURCES:-{}}
       SEAWEED_ZIP_DISK_QUOTA: ${SEAWEED_ZIP_DISK_QUOTA:-53687091200}
     volumes:

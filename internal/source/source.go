@@ -2,9 +2,6 @@ package source
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -13,20 +10,25 @@ import (
 	"path"
 	"seaweed-zip/internal/pack"
 	"strings"
+	"sync"
 	"time"
 )
 
 var ErrAuthorization = errors.New("source GET authorization rejected")
 
 type Rule struct {
+	Scheme string `json:"scheme"`
 	Host   string `json:"host"`
 	Prefix string `json:"prefix"`
 	Dial   string `json:"dial,omitempty"`
 	Bucket string `json:"bucket"`
 }
-type Client struct{ Rules map[string]Rule }
+type Client struct {
+	Rules       map[string]Rule
+	Concurrency int
+}
 
-func New(r map[string]Rule) *Client { return &Client{Rules: r} }
+func New(r map[string]Rule) *Client { return &Client{Rules: r, Concurrency: 4} }
 func Metadata(ip net.IP) bool {
 	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.Equal(net.ParseIP("168.63.129.16")) || ip.Equal(net.ParseIP("100.100.100.200")) || ip.Equal(net.ParseIP("fd00:ec2::254")) || inCIDR(ip, "192.0.0.0/24")
 }
@@ -41,7 +43,7 @@ func (c *Client) Get(ctx context.Context, id, raw string) (io.ReadCloser, error)
 		return fail()
 	}
 	u, e := url.Parse(raw)
-	if e != nil || u.User != nil || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") || !strings.EqualFold(u.Host, rule.Host) || rule.Prefix == "" || !strings.HasPrefix(u.Path, rule.Prefix) || path.Clean(u.Path) != strings.TrimSuffix(u.Path, "/") || strings.ContainsAny(u.Path, "\\\x00") {
+	if e != nil || u.User != nil || u.Fragment != "" || (u.Scheme != "http" && u.Scheme != "https") || (u.Scheme != rule.Scheme) || !strings.EqualFold(u.Host, rule.Host) || rule.Prefix == "" || !strings.HasPrefix(u.Path, rule.Prefix) || path.Clean(u.Path) != strings.TrimSuffix(u.Path, "/") || strings.ContainsAny(u.Path, "\\\x00") {
 		return fail()
 	}
 	target := u.Host
@@ -94,9 +96,24 @@ func (c *Client) Get(ctx context.Context, id, raw string) (io.ReadCloser, error)
 	return resp.Body, nil
 }
 func (c *Client) Authorize(ctx context.Context, p pack.Plan, maxManifest int64) error {
+	if p.Request.ContractVersion != pack.ContractVersion {
+		return errors.New("unsupported contract")
+	}
 	rule, ok := c.Rules[p.Request.SourceID]
 	if !ok || rule.Bucket != p.Request.Bucket {
 		return errors.New("source scope denied")
+	}
+	bound := func(raw, key string) bool {
+		u, e := url.Parse(raw)
+		return e == nil && u.Path == "/"+rule.Bucket+"/"+key
+	}
+	if !bound(p.Request.ManifestURL, p.Request.Game+"/manifests/"+p.Request.Platform+"/"+p.Request.Release+".json") {
+		return errors.New("manifest locator mismatch")
+	}
+	for _, o := range p.Objects {
+		if !bound(o.URL, p.Request.Game+"/blobs/sha256/"+o.SHA256[:2]+"/"+o.SHA256) {
+			return errors.New("object locator mismatch")
+		}
 	}
 	r, e := c.Get(ctx, p.Request.SourceID, p.Request.ManifestURL)
 	if e != nil {
@@ -107,28 +124,48 @@ func (c *Client) Authorize(ctx context.Context, p pack.Plan, maxManifest int64) 
 	if e != nil || int64(len(b)) > maxManifest {
 		return errors.New("manifest limit")
 	}
-	h := sha256.Sum256(b)
-	if hex.EncodeToString(h[:]) != p.Request.ManifestSHA256 {
-		return errors.New("manifest hash mismatch")
+	if e := pack.VerifyManifest(b, p.Request); e != nil {
+		return e
 	}
-	var identity struct {
-		Game     string `json:"game"`
-		Platform string `json:"platform"`
-		Release  string `json:"release"`
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	workers := min(max(c.Concurrency, 1), 16, len(p.Objects))
+	queue := make(chan pack.Object)
+	var wg sync.WaitGroup
+	var once sync.Once
+	var first error
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for o := range queue {
+				r, e := c.Get(ctx, p.Request.SourceID, o.URL)
+				if e == nil {
+					n, copyErr := io.Copy(io.Discard, io.LimitReader(r, min(o.Size, 4096)))
+					r.Close()
+					if copyErr != nil || n != min(o.Size, 4096) {
+						e = errors.New("object authorization failed")
+					}
+				}
+				if e != nil {
+					once.Do(func() { first = e; cancel() })
+					return
+				}
+			}
+		}()
 	}
-	if json.Unmarshal(b, &identity) != nil || identity.Game != p.Request.Game || identity.Platform != p.Request.Platform || identity.Release != p.Request.Release {
-		return errors.New("manifest identity mismatch")
-	}
+send:
 	for _, o := range p.Objects {
-		r, e = c.Get(ctx, p.Request.SourceID, o.URL)
-		if e != nil {
-			return e
-		}
-		n, e := io.Copy(io.Discard, io.LimitReader(r, min(o.Size, 4096)))
-		r.Close()
-		if e != nil || n != min(o.Size, 4096) {
-			return errors.New("object authorization failed")
+		select {
+		case queue <- o:
+		case <-ctx.Done():
+			break send
 		}
 	}
-	return nil
+	close(queue)
+	wg.Wait()
+	if first != nil {
+		return first
+	}
+	return ctx.Err()
 }

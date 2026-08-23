@@ -27,3 +27,25 @@ func TestExplicitLimitsAndDefaultDeny(t *testing.T) {
 		t.Fatal("invalid limit accepted")
 	}
 }
+
+func TestSourceSchemeAndWindowQuota(t *testing.T) {
+	t.Setenv("SEAWEED_ZIP_SOURCES", `{"resources":{"scheme":"http","host":"signed.example:8333","bucket":"b","prefix":"/b/","dial":"seaweedfs:8333"}}`)
+	t.Setenv("SEAWEED_ZIP_CONCURRENCY", "4")
+	c, e := Load()
+	if e != nil || c.Concurrency != 4 {
+		t.Fatal(e)
+	}
+	t.Setenv("SEAWEED_ZIP_SOURCES", `{"resources":{"host":"signed.example:8333","bucket":"b","prefix":"/b/"}}`)
+	if _, e = Load(); e == nil {
+		t.Fatal("scheme not required")
+	}
+	t.Setenv("SEAWEED_ZIP_SOURCES", "")
+	t.Setenv("SEAWEED_ZIP_DISK_QUOTA", "11811160064")
+	if _, e = Load(); e == nil {
+		t.Fatal("ZIP plus staging quota missing")
+	}
+	t.Setenv("SEAWEED_ZIP_CONCURRENCY", "17")
+	if _, e = Load(); e == nil {
+		t.Fatal("unbounded concurrency")
+	}
+}

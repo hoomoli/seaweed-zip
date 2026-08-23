@@ -34,6 +34,10 @@ type Manager struct {
 }
 
 func New(s *store.Store, c *source.Client, cfg config.Config) *Manager {
+	if cfg.Concurrency == 0 {
+		cfg.Concurrency = 4
+	}
+	c.Concurrency = cfg.Concurrency
 	return &Manager{Store: s, Source: c, Config: cfg, auth: map[string]authorization{}}
 }
 func (m *Manager) cacheRoom(p pack.Plan) bool {
@@ -102,7 +106,8 @@ func (m *Manager) Capacity(ctx context.Context, id string) error {
 	if e != nil {
 		return errors.New("storage unavailable")
 	}
-	if used > m.Config.DiskQuota-m.Config.MaxZIPBytes {
+	reserve := m.Config.MaxZIPBytes + min(m.Config.MaxBytes, int64(m.Config.Concurrency)*m.Config.MaxObjectBytes)
+	if used > m.Config.DiskQuota-reserve {
 		return errors.New("disk quota")
 	}
 
@@ -110,7 +115,7 @@ func (m *Manager) Capacity(ctx context.Context, id string) error {
 	if e = m.Store.DB.QueryRowContext(ctx, "SELECT count(*) FROM packs WHERE id<>? AND state IN ('QUEUED','VALIDATING','PACKING','WAITING_AUTH')", id).Scan(&pending); e != nil {
 		return errors.New("storage unavailable")
 	}
-	if pending > (m.Config.DiskQuota-used-m.Config.MaxZIPBytes)/m.Config.MaxZIPBytes {
+	if pending > (m.Config.DiskQuota-used-reserve)/reserve {
 		return errors.New("disk quota")
 	}
 	return nil
@@ -221,6 +226,13 @@ func (m *Manager) build(parent context.Context, job store.Pack, p pack.Plan) {
 		return
 	}
 	defer os.Remove(tmp)
+	stage, e := os.MkdirTemp(dir, fmt.Sprintf("%s-%d.staging-", p.ID, job.Generation))
+	if e != nil {
+		f.Close()
+		m.Store.Fail(parent, p.ID, job.Generation, "FAILED", "STORAGE_ERROR")
+		return
+	}
+	defer os.RemoveAll(stage)
 	var progressMu sync.Mutex
 	var done int64
 	var count int
@@ -228,7 +240,7 @@ func (m *Manager) build(parent context.Context, job store.Pack, p pack.Plan) {
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		t := time.NewTicker(5 * time.Second)
+		t := time.NewTicker(time.Second)
 		defer t.Stop()
 		for {
 			select {
@@ -237,6 +249,11 @@ func (m *Manager) build(parent context.Context, job store.Pack, p pack.Plan) {
 			case <-ctx.Done():
 				return
 			case <-t.C:
+				current, e := m.Store.Get(ctx, p.ID)
+				if e != nil || current.State != "PACKING" || current.Generation != job.Generation {
+					cancel()
+					return
+				}
 				progressMu.Lock()
 				n, c := done, count
 				progressMu.Unlock()
@@ -247,9 +264,9 @@ func (m *Manager) build(parent context.Context, job store.Pack, p pack.Plan) {
 		}
 	}()
 	h := sha256.New()
-	e = pack.Write(ctx, io.MultiWriter(f, h), p, func(ctx context.Context, o pack.Object) (io.ReadCloser, error) {
+	e = pack.WriteConcurrent(ctx, io.MultiWriter(f, h), p, func(ctx context.Context, o pack.Object) (io.ReadCloser, error) {
 		return m.Source.Get(ctx, p.Request.SourceID, o.URL)
-	}, func(n int64, c int) { progressMu.Lock(); done, count = n, c; progressMu.Unlock() }, m.Config.MaxZIPBytes)
+	}, func(n int64, c int) { progressMu.Lock(); done, count = n, c; progressMu.Unlock() }, m.Config.MaxZIPBytes, stage, m.Config.Concurrency)
 	close(stop)
 	<-stopped
 	if e == nil {
@@ -273,8 +290,9 @@ func (m *Manager) build(parent context.Context, job store.Pack, p pack.Plan) {
 		if ctx.Err() != nil {
 			code = "TASK_TIMEOUT_OR_CANCELLED"
 		}
-		m.Store.Fail(parent, p.ID, job.Generation, state, code)
-		m.Store.Event(parent, p.ID, state, code)
+		if m.Store.Fail(parent, p.ID, job.Generation, state, code) == nil {
+			m.Store.Event(parent, p.ID, state, code)
+		}
 		return
 	}
 	if e = m.Store.Progress(ctx, p.ID, job.Generation, p.Bytes, len(p.Objects)); e != nil {

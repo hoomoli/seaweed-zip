@@ -15,20 +15,20 @@ type Config struct {
 	Address, DataDir                                                   string
 	Sources                                                            map[string]source.Rule
 	Trusted, Admin                                                     []*net.IPNet
-	MaxObjects                                                         int
+	MaxObjects, Concurrency                                            int
 	MaxBytes, MaxObjectBytes, MaxZIPBytes, MaxManifestBytes, DiskQuota int64
 	TaskTimeout, DownloadTimeout                                       time.Duration
 }
 
 func Load() (Config, error) {
-	c := Config{Address: env("SEAWEED_ZIP_ADDR", ":8080"), DataDir: env("SEAWEED_ZIP_DATA", "data"), Sources: map[string]source.Rule{}, MaxObjects: 10000, MaxBytes: 10 << 30, MaxObjectBytes: 2 << 30, MaxZIPBytes: 11 << 30, MaxManifestBytes: 16 << 20, DiskQuota: 50 << 30, TaskTimeout: time.Hour, DownloadTimeout: 2 * time.Hour}
+	c := Config{Address: env("SEAWEED_ZIP_ADDR", ":8080"), DataDir: env("SEAWEED_ZIP_DATA", "data"), Sources: map[string]source.Rule{}, Concurrency: 4, MaxObjects: 10000, MaxBytes: 10 << 30, MaxObjectBytes: 2 << 30, MaxZIPBytes: 11 << 30, MaxManifestBytes: 8 << 20, DiskQuota: 50 << 30, TaskTimeout: time.Hour, DownloadTimeout: 2 * time.Hour}
 	if s := os.Getenv("SEAWEED_ZIP_SOURCES"); s != "" {
 		if e := json.Unmarshal([]byte(s), &c.Sources); e != nil {
 			return c, errors.New("invalid source configuration")
 		}
 	}
 	for _, r := range c.Sources {
-		if r.Host == "" || r.Bucket == "" || !strings.HasPrefix(r.Prefix, "/") || !strings.HasSuffix(r.Prefix, "/") {
+		if (r.Scheme != "http" && r.Scheme != "https") || r.Host == "" || r.Bucket == "" || r.Prefix != "/"+r.Bucket+"/" {
 			return c, errors.New("invalid source scope")
 		}
 		if r.Dial != "" {
@@ -36,6 +36,13 @@ func Load() (Config, error) {
 				return c, errors.New("invalid dial target")
 			}
 		}
+	}
+	if value := os.Getenv("SEAWEED_ZIP_CONCURRENCY"); value != "" {
+		n, e := strconv.Atoi(value)
+		if e != nil || n < 1 || n > 16 {
+			return c, errors.New("invalid concurrency")
+		}
+		c.Concurrency = n
 	}
 	var e error
 	c.Trusted, e = cidrs(os.Getenv("SEAWEED_ZIP_TRUSTED_CIDRS"))
@@ -71,7 +78,7 @@ func Load() (Config, error) {
 			*dst = time.Duration(n) * time.Second
 		}
 	}
-	if c.DiskQuota < c.MaxZIPBytes {
+	if c.DiskQuota < c.MaxZIPBytes+min(c.MaxBytes, int64(c.Concurrency)*c.MaxObjectBytes) {
 		return c, errors.New("disk quota below artifact limit")
 	}
 	return c, nil

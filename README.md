@@ -7,10 +7,10 @@ with a consumer capability. No S3 secret keys, source writes or source deletes.
 - Go HTTP server, SQLite WAL, transactional idempotency and generation fencing.
 - Per-object SHA256/length verification, bounded streaming and ZIP64.
 - Range / If-Range / HEAD, explicit consumer acknowledgment and authorization recovery.
-- Minimum 24-hour artifact retention, daily cleanup at 04:10 Asia/Shanghai,
+- 24-hour unacknowledged expiry, prompt all-consumer ACK cleanup, daily 04:10 sweep,
   and three-calendar-month history retention.
 - Compact desktop/mobile management UI; English and Simplified Chinese.
-- Creation and management denied by default; configure trusted TCP peer networks.
+- Source GET authorization for submission; Pocket ID OIDC for management.
 
 ## Run locally
 
@@ -28,6 +28,7 @@ build the frontend before running Go commands. Health endpoints are public;
 management and creation remain denied until explicitly configured.
 
 Read [operations](docs/operations.md), [architecture](docs/architecture.md),
+the [versioned delivery contract](docs/contracts/release-manifest-v1.md)
 and the [OpenAPI contract](api/openapi.yaml) before configuring a real source.
 One process owns one dedicated volume. This is not a transparent S3 proxy.
 Real SeaweedFS interoperability, restore drills and production capacity must be

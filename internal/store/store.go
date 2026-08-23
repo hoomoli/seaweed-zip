@@ -220,7 +220,7 @@ func (s *Store) Claim(ctx context.Context, id string, now time.Time) (Pack, erro
 	}
 	p, e := s.Get(ctx, id)
 	if e == nil {
-		_, e = s.DB.ExecContext(ctx, "UPDATE consumers SET generation=?,ack=0 WHERE pack_id=? AND cancelled=0", p.Generation, id)
+		_, e = s.DB.ExecContext(ctx, "UPDATE consumers SET generation=? WHERE pack_id=? AND cancelled=0 AND ack=0", p.Generation, id)
 	}
 	return p, e
 }
@@ -263,7 +263,7 @@ func (s *Store) Ack(ctx context.Context, c Consumer, g int64, hash string) error
 	}
 	defer tx.Rollback()
 	var ack bool
-	e = tx.QueryRowContext(ctx, "SELECT consumers.ack FROM consumers JOIN packs ON packs.id=consumers.pack_id WHERE consumers.id=? AND consumers.cancelled=0 AND consumers.generation=? AND packs.state='READY' AND packs.generation=? AND packs.hash=?", c.ID, g, g, hash).Scan(&ack)
+	e = tx.QueryRowContext(ctx, "SELECT consumers.ack FROM consumers JOIN packs ON packs.id=consumers.pack_id WHERE consumers.id=? AND consumers.cancelled=0 AND consumers.generation=? AND (packs.state='READY' OR consumers.ack=1 AND packs.state IN ('DELETING','DELETED')) AND packs.generation=? AND packs.hash=?", c.ID, g, g, hash).Scan(&ack)
 	if e == sql.ErrNoRows {
 		return ErrConflict
 	}
@@ -290,12 +290,12 @@ func (s *Store) Cancel(ctx context.Context, c Consumer) error {
 }
 func (s *Store) BeginDownload(ctx context.Context, c Consumer, until time.Time) (string, error) {
 	id := ID()
-	e := changed(s.DB.ExecContext(ctx, "INSERT INTO downloads(id,consumer_id,pack_id,expires) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM packs JOIN consumers ON consumers.pack_id=packs.id WHERE packs.id=? AND packs.state='READY' AND consumers.id=? AND consumers.cancelled=0)", id, c.ID, c.PackID, until.Unix(), c.PackID, c.ID))
+	e := changed(s.DB.ExecContext(ctx, "INSERT INTO downloads(id,consumer_id,pack_id,expires) SELECT ?,?,?,? WHERE EXISTS(SELECT 1 FROM packs JOIN consumers ON consumers.pack_id=packs.id WHERE packs.id=? AND packs.state='READY' AND consumers.id=? AND consumers.cancelled=0 AND consumers.ack=0 AND consumers.generation=packs.generation) AND (SELECT count(*) FROM downloads WHERE pack_id=? AND expires>?)<16", id, c.ID, c.PackID, until.Unix(), c.PackID, c.ID, c.PackID, time.Now().Unix()))
 	return id, e
 }
 func (s *Store) EndDownload(id string) { s.DB.Exec("DELETE FROM downloads WHERE id=?", id) }
 func (s *Store) CleanClaim(ctx context.Context, id string, now time.Time) error {
-	return changed(s.DB.ExecContext(ctx, "UPDATE packs SET state='DELETING' WHERE id=? AND (state='READY' AND delete_after<=? OR state='DELETING') AND NOT EXISTS(SELECT 1 FROM downloads WHERE pack_id=? AND expires>?)", id, now.Unix(), id, now.Unix()))
+	return changed(s.DB.ExecContext(ctx, "UPDATE packs SET state='DELETING' WHERE id=? AND (state='READY' AND (delete_after<=? OR NOT EXISTS(SELECT 1 FROM consumers WHERE pack_id=? AND cancelled=0 AND ack=0)) OR state='DELETING') AND NOT EXISTS(SELECT 1 FROM downloads WHERE pack_id=? AND expires>?)", id, now.Unix(), id, id, now.Unix()))
 }
 func (s *Store) Deleted(ctx context.Context, id string, g int64, now time.Time) error {
 	return changed(s.DB.ExecContext(ctx, "UPDATE packs SET state='DELETED',deleted_at=?,artifact='',error='' WHERE id=? AND generation=? AND state='DELETING'", now.Unix(), id, g))

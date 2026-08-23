@@ -13,15 +13,15 @@ go vet ./...
 go run ./cmd/seaweed-zip
 ```
 
-By default, creation and all management routes return 403. Health endpoints are
+By default, no source is allowed; source authorization rejects creation.
+Management routes return 403 without Pocket ID administrator authentication. Health endpoints are
 public and contain no task data. Frontend assets in web/dist are generated and ignored; build them before
 Go tests or compilation. Docker and CI perform that step automatically.
 
 Development environment (do not copy to a public deployment):
 
 ```
-export SEAWEED_ZIP_TRUSTED_CIDRS=127.0.0.0/8,::1/128
-export SEAWEED_ZIP_SOURCES='{"assets":{"host":"storage.example.invalid:8333","bucket":"resources","prefix":"/resources/","dial":"seaweedfs:8333"}}'
+export SEAWEED_ZIP_SOURCES='{"resources":{"scheme":"http","host":"storage.example.invalid:8333","bucket":"resources","prefix":"/resources/","dial":"seaweedfs:8333"}}'
 go run ./cmd/seaweed-zip
 ```
 
@@ -31,17 +31,45 @@ backend memory/storage, never query strings or browser localStorage. Never log
 request bodies, Authorization headers, upstream response bodies or presigned URLs
 at reverse proxies. TLS is required on any non-loopback consumer connection.
 
+### Explicit internal storage route
+
+Each source rule requires `scheme`, signed `host`, `bucket` and exact
+`prefix: /<bucket>/`; optional `dial` is a single administrator-owned host:port.
+For a deployment whose storage service alias is `platform-pre-seaweedfs:8333`
+on the shared `dokploy-network`, an explicitly approved internal HTTP rule is:
+
+```json
+{"resources":{"scheme":"http","host":"platform-pre-seaweedfs:8333","bucket":"resources","prefix":"/resources/","dial":"platform-pre-seaweedfs:8333"}}
+```
+
+The bucket above is illustrative; use the actual shared resource bucket. The
+resource administrator must create presigns with that exact HTTP endpoint, using
+a separate signer from its public-endpoint manifest reader. The Zip container
+must resolve the alias on the shared network. Before enabling the integration,
+verify a real presigned manifest AND selected blob GET from the container with
+original Host/raw query intact. A publicly signed HTTPS URL instead needs an
+HTTPS route with its original hostname/SNI and a valid certificate; pointing its
+dial at plaintext port 8333 is not a valid TLS route and fails closed. Never change
+scheme/host of an already-signed URL or add an arbitrary request-provided dial.
+
+This repository records the route option but does not modify external Compose,
+networks, storage settings or production configuration. Source rules without a
+scheme are rejected at startup; migrate old administrator-owned rules explicitly.
+
 ## Limits
 
 Defaults: 10,000 unique objects, 2 GiB/object, 10 GiB payload, 11 GiB ZIP,
-16 MiB manifest, one active worker, one synchronous source authorization request,
+8 MiB manifest, one active ZIP writer, one synchronous submission at a time (global burst 4, refill 1/second),
+four bounded authorization probes and four bounded staged downloads,
 128 cached plans / 64 MiB authorization memory (15-minute TTL), 1-hour task and 2-hour maximum download lease; volume quota 50 GiB.
 Environment byte overrides: SEAWEED_ZIP_MAX_BYTES, MAX_OBJECT_BYTES, MAX_ZIP_BYTES,
 MAX_MANIFEST_BYTES, DISK_QUOTA (each prefix SEAWEED_ZIP_). These are development
 starting points, not measured production capacity. Additional overrides:
-SEAWEED_ZIP_MAX_OBJECTS, SEAWEED_ZIP_TASK_TIMEOUT_SECONDS,
+SEAWEED_ZIP_CONCURRENCY (1..16, default 4), SEAWEED_ZIP_MAX_OBJECTS,
+SEAWEED_ZIP_TASK_TIMEOUT_SECONDS,
 SEAWEED_ZIP_DOWNLOAD_TIMEOUT_SECONDS. Provision enough physical space
-and monitor disk usage. Capacity pressure rejects work, never deletes unexpired
+and monitor disk usage. Reserve ZIP output plus up to one concurrency window
+of temporary object files (also enforced by admission); no full-package memory buffer. Capacity pressure rejects work, never deletes unexpired
 READY packages. Requests are limited to 8 MiB JSON. Untrusted upstream failures
 return safe problem details; see events for safe lifecycle codes.
 
@@ -49,8 +77,8 @@ return safe problem details; see events for safe lifecycle codes.
 
 `docker compose up --build` binds only localhost, mounts its own named volume,
 uses UID 10001, read-only root FS, no capabilities, memory/CPU limits and healthcheck.
-Do not attach SeaweedFS data volumes. Configure CIDRs for actual TCP peers;
-Docker forwarded traffic may not appear as 127.0.0.1. Never allow 0.0.0.0/0.
+Do not attach SeaweedFS data volumes. Submission does not require peer CIDRs;
+source GET authorization, strict allowlisted routes and admission limits remain.
 No production deployment is created by this repository.
 
 Only one server process may own a volume. SQLite is not a multi-instance queue.
@@ -73,12 +101,13 @@ sweeps, so a long-running worker cannot defer credential eviction.
 The first scheduled cleanup plus maximum download duration is a hard upper
 bound for renewing download leases (410 afterwards). Delayed/failed eligible
 cleanup retries once per minute.
-No endpoint performs immediate destructive operator cleanup. Changing sources or
+Matching ACK / consumer cancellation / download exit trigger eligible cleanup.
+Only all-consumer completion or expiry can remove a READY shared artifact. Changing sources or
 limits requires restart and review of WAITING_AUTH tasks.
 
 ## Production acceptance (not executed)
 
-1. Confirm volume capacity, allowed hosts, creation trusted networks, TLS and OIDC authorization.
+1. Confirm volume capacity, allowed source schemes/hosts/routes, quotas, TLS and OIDC authorization.
 2. Recheck pinned toolchain/dependency security at rollout; build nonroot image.
 3. Verify true SeaweedFS presigned GET over the configured fixed route, preserving
    signed Host, raw path/query and transport semantics. No unsigned fallback.
@@ -93,7 +122,7 @@ Management UI and `/api/v1/admin/*` require a server-side OIDC session.
 `SEAWEED_ZIP_ADMIN_CIDRS` is a legacy setting and no longer grants management
 access, even on localhost. Missing OIDC configuration denies management;
 partial/invalid configuration or failed discovery prevents startup. Health,
-creation network restrictions and consumer capability tokens remain independent.
+source GET authorization and consumer capability tokens remain independent.
 Do not allow an entire proxy network merely to make management accessible.
 
 Configure a dedicated **Confidential** Web client in Pocket ID with exactly:

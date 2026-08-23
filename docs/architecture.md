@@ -5,10 +5,10 @@ transparent proxy and does not perform consumer-side deployment.
 
 ## Trust boundaries
 
-- Submission and reauthorization require explicit trusted peer CIDRs.
-- Management UI/API require independent admin peer CIDRs. Forwarded headers
-  are intentionally ignored. Protect any allowed reverse proxy with real
-  authentication and access rules; allowing a proxy CIDR trusts all its traffic.
+- Submission and reauthorization prove source GET access, without trusted CIDRs
+  or an extra machine API token. Bounded admission/source work and quotas remain.
+- Management UI/API require Pocket ID OIDC sessions and exact administrator
+  group membership. Consumer capabilities never grant management privileges.
 - Consumers use 256-bit random Bearer capabilities. SQLite stores SHA256 only.
   Repeated authorized submission with the same clientRequestId rotates the token.
   Same key with different content returns 409. The key is global to this trusted
@@ -26,14 +26,14 @@ transparent proxy and does not perform consumer-side deployment.
 
 ## Manifest contract
 
-The v1 manifest must be JSON with string fields `game`, `platform`, `release`.
-Additional manifest fields are allowed. Hash is SHA256 of the original bytes.
-The gateway compares all three identity fields exactly. It does not recompute
-a caller-specific canonical manifestHash. `canonicalManifestHash` is a separate informational
-label, excluded from pack identity. Adapting an existing differently-shaped
-manifest needs a source-specific, golden-tested adapter, not JSON reserialization.
-Selected blobs are an authorized selection, not a claim that the package contains
-all resources in the manifest.
+The versioned [release-manifest-v1 contract](contracts/release-manifest-v1.md)
+uses the resource administrator's strict schemaVersion=1/gameId/platform/releaseId
+manifest. Both raw-byte manifestSha256 and independently reconstructed canonical
+manifestHash are checked. Supported immutable manifests must already be canonical;
+the hashes therefore agree but their purposes remain separate. Unknown/duplicate
+fields, unsafe/colliding paths, wrong immutable locators, inconsistent sizes and
+objects outside the full files manifest fail. Only selected missing public blobs
+enter the bag; private source packages are excluded.
 
 ## Content and state
 
@@ -44,9 +44,13 @@ labels do not. Blob hash/size conflicts fail before reading any source.
 SQLite WAL + one pooled connection + foreign keys + busy timeout. INSERT ON
 CONFLICT creates a single pack; consumer insertion and key conflict checks are
 transactional. Worker scans SQLite rather than request callbacks. Serial worker
-uses conditional claims, an incrementing generation, five-second heartbeat and
+uses conditional claims, an incrementing generation, one-second cancellation/lease heartbeat and
 conditional READY publication. ZIP paths include generation; hash/size-checked
-Store entries stream with a 64 KiB buffer and an explicit output bound. Go's
+Store entries stream with a 64 KiB buffer and an explicit output bound. Both
+authorization probes and blob downloads default to four concurrent requests.
+A bounded window downloads size/hash-verified temporary files on the persistent
+volume. A single ZIP writer consumes/removes the window before another is admitted;
+quota reservation includes ZIP output plus maximum staging-window bytes. Go's
 archive/zip automatically uses ZIP64 where required.
 
 The ZIP contains bagit.txt, bag-info.txt, manifest-sha256.txt and one
@@ -60,14 +64,14 @@ Canceled final consumer fences unfinished work; other consumers are unaffected.
 
 ## Retention
 
-READY gets a minimum 24-hour expiry; cleanup runs daily at Shanghai 04:10 and
-on startup. Open downloads register individual bounded leases before opening the
-file; cleanup claims atomically exclude nonexpired leases. Lease renewal cannot
-retain a pack forever: all download leases are capped at the first scheduled
-cleanup after expiry plus the configured maximum lease duration. Deferred/failed
-cleanup retries each minute without advancing other packages' daily eligibility. HTTP Range/HEAD and
-If-Range use the file's ZIP hash ETag. Sending a response never acknowledges a
-consumer. ACK must match current generation and ZIP hash.
+READY expires after 24 hours if unacknowledged. Once every independent consumer
+ACKs/cancels, cleanup is eligible immediately, but active downloads protect shared
+packages. Cleanup claims atomically exclude nonexpired leases. At most 16 concurrent
+download leases per pack are allowed; each is time bounded and the overall renewal
+window cannot retain a pack forever. ACK/cancel/download exit trigger cleanup;
+startup, daily Shanghai 04:10 and minute retries recover missed cleanup.
+HTTP Range/HEAD and If-Range use the file's ZIP hash ETag. Sending a response never
+acknowledges a consumer. ACK must match current generation and ZIP hash.
 
 Deletion first enters DELETING, then removes only its controlled local artifact,
 then commits DELETED. Failure remains traceable for retry. Records/events expire
