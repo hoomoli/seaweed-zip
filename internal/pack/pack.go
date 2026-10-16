@@ -51,15 +51,24 @@ func ValidHash(s string) bool {
 func Normalize(r Request) (Plan, error) {
 	var p Plan
 	label := regexp.MustCompile(`^[A-Za-z0-9._-]{1,256}$`)
+	// Node/deployment are opaque, informational labels: they are stored and echoed
+	// back but never routed, hashed or used as a path. The contract only forbids
+	// URLs and credentials, so allow printable ASCII beyond the strict identity
+	// charset (e.g. the ':' in an internal task ID) while still rejecting "/" and
+	// control characters that could smuggle a URL path or header delimiter.
+	safeLabel := regexp.MustCompile(`^[\x21-\x7E]{1,256}$`)
 	for _, s := range []string{r.SourceID, r.Bucket, r.Game, r.Platform, r.Release} {
 		if !label.MatchString(s) {
 			return p, errors.New("invalid identity")
 		}
 	}
-	for _, s := range []string{r.Node, r.Deployment, r.ClientRequestID} {
-		if s != "" && !label.MatchString(s) {
+	for _, s := range []string{r.Node, r.Deployment} {
+		if s != "" && (!safeLabel.MatchString(s) || strings.ContainsAny(s, "/\\@")) {
 			return p, errors.New("invalid label")
 		}
+	}
+	if r.ClientRequestID != "" && !label.MatchString(r.ClientRequestID) {
+		return p, errors.New("invalid label")
 	}
 	if !ValidHash(r.ManifestSHA256) || len(r.Objects) == 0 {
 		return p, errors.New("invalid manifest or empty selection")

@@ -33,6 +33,31 @@ func TestIdentityAndConflicts(t *testing.T) {
 		t.Fatal("conflicting sizes accepted")
 	}
 }
+
+func TestLabelsAllowOpaqueTaskIDsButRejectURLs(t *testing.T) {
+	h := strings.Repeat("a", 64)
+	base := Request{SourceID: "s", Bucket: "b", Game: "g", Platform: "p", Release: "r", ManifestSHA256: h, Objects: []Object{{SHA256: h, Size: 3}}}
+	// Internal task IDs such as "auto:local:game:android:2026-10-16-01" contain ':'
+	// and must be accepted as opaque deployment labels.
+	withLabel := base
+	withLabel.Deployment = "auto:local:g:android:2026-10-16-01"
+	withLabel.Node = "191dokploy"
+	a, err := Normalize(withLabel)
+	if err != nil {
+		t.Fatalf("opaque label rejected: %v", err)
+	}
+	b, _ := Normalize(base)
+	if a.ID != b.ID {
+		t.Fatal("label must not affect plan identity")
+	}
+	for _, bad := range []string{"http://x", "user:pass@host", "a/b", "a\\b", "has space", "tab\tchar"} {
+		r := base
+		r.Deployment = bad
+		if _, err := Normalize(r); err == nil {
+			t.Fatalf("unsafe label accepted: %q", bad)
+		}
+	}
+}
 func TestBagItAndIntegrity(t *testing.T) {
 	payload := []byte("abc")
 	sum := sha256.Sum256(payload)

@@ -67,7 +67,11 @@ The route is tested with a signed GET before enabling it. See operations docs.
 Authorization and object download concurrency are separately bounded (default
 4). Admission, object/task/disk limits and timeouts still apply; overload is 429.
 URLs/tokens are never stored in durable job records or printed in logs/errors.
-Node/deployment labels must not contain URLs or credentials.
+Node/deployment labels must not contain URLs or credentials. Labels are opaque
+and informational: they are stored and echoed back but never routed, hashed or
+used as a path, so they accept printable ASCII (1-256 characters) other than
+`/`, `\` and `@` (for example an internal task ID `auto:local:game:android:...`).
+`clientRequestId` stays a URL-safe token (`[A-Za-z0-9._-]`).
 
 ## Response, polling and recovery
 
